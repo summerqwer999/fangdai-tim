@@ -1,3 +1,15 @@
+// 这是一个安全启动器，确保 $ 加载后才运行逻辑
+(function() {
+    var checkReady = function(callback) {
+        if (window.jQuery) {
+            callback(jQuery);
+        } else {
+            window.setTimeout(function() { checkReady(callback); }, 50);
+        }
+    };
+
+    checkReady(function($) {
+        // --- 你的原有代码从这里开始 ---
 var businessShortRateArr6 = [5.1, 5.35, 5.6, 5.85, 6.1, 5.85, 5.6, 5.6, 5.35, 5.1, 4.85, 4.6, 3.45],
     businessShortRateArr12 = [5.56, 5.81, 6.06, 6.31, 6.56, 6.31, 6, 5.6, 5.35, 5.1, 4.85, 4.6, 3.45],
     businessShortRateArr36 = [5.6, 5.85, 6.1, 6.4, 6.65, 6.4, 6.15, 6, 5.75, 5.5, 5.25, 5, 3.45],
@@ -323,3 +335,6 @@ function calculate_debj_doubleLoan(a, b, d, f) {
         "元");
     return h
 };
+        // --- 你的原有代码在这里结束 ---
+    });
+})();
