@@ -1,330 +1,325 @@
-/**
- * 柚子工具网 (UZTOOL.COM) - 房贷计算器核心逻辑引擎
- * 针对 GitHub Pages 环境优化：强制锁定 jQuery 作用域
- * 深度优化版：保留全部 UI 逻辑，修正高精度计算误差，完善混合贷款引擎
- */
-(function($) {
-    // 所有的计算逻辑和绑定都在这里执行
-    var runCalculator = function() {
-        console.log("UZTOOL: 房贷深度测算引擎已就绪...");
-
-        // --- 1. 全局参数与利率矩阵 (原始资产) ---
-        var businessShortRateArr6 = [5.1, 5.35, 5.6, 5.85, 6.1, 5.85, 5.6, 5.6, 5.35, 5.1, 4.85, 4.6, 3.45],
-            businessShortRateArr12 = [5.56, 5.81, 6.06, 6.31, 6.56, 6.31, 6, 5.6, 5.35, 5.1, 4.85, 4.6, 3.45],
-            businessShortRateArr36 = [5.6, 5.85, 6.1, 6.4, 6.65, 6.4, 6.15, 6, 5.75, 5.5, 5.25, 5, 3.45],
-            businessShortRateArr60 = [5.96, 6.22, 6.45, 6.65, 6.9, 6.65, 6.4, 6, 5.75, 5.5, 5.25, 5, 4.2],
-            businessLongRateArr = [6.14, 6.4, 6.6, 6.8, 7.05, 6.8, 6.55, 6.15, 5.9, 5.65, 5.4, 5.15, 4.2],
-            PAFShortRateArr = [3.5, 3.75, 4, 4.2, 4.45, 4.2, 4, 3.75, 3.5, 3.25, 3, 2.75, 2.75],
-            PAFLongRateArr = [4.05, 4.3, 4.5, 4.7, 4.45, 4.7, 4.5, 4.25, 4, 3.75, 3.5, 3.25, 3.25],
-            loanType = 0, // 0:商贷, 1:公积金, 2:混合
-            loanPeriods = 240,
-            businessPeriodType = 4,
-            PAFPeriodType = 1,
-            businessRateType = 12,
-            PAFRateType = 12,
-            businessDiscount = 1,
-            showResultTabID = 1,
-            simpleDataTableMaxLines = 10;
-
-        // --- 2. 交互逻辑绑定 (UI 状态流转) ---
-
-        // 贷款类型切换 (商贷/公积金/混合)
-        $("#business_calc, #PAF_calc, #mix_calc").on("click", function() {
-            if ($(this).hasClass("normal-tab")) {
-                $(this).removeClass("normal-tab").addClass("select-tab").siblings(".tab").removeClass("select-tab").addClass("normal-tab");
-                var id = $(this).attr("id");
-                if (id === "business_calc") {
-                    $("#business_sum_line, #business_rate_select_line, #business_rate_value_line, #business_atc_recmd_mod").show();
-                    $("#PAF_sum_line, #PAF_rate_line, [id*='interest_total_debx'], [id*='interest_total_debj'], #PAF_atc_recmd_mod").hide();
-                    loanType = 0;
-                } else if (id === "PAF_calc") {
-                    $("#PAF_sum_line, #PAF_rate_line, #PAF_atc_recmd_mod").show();
-                    $("#business_sum_line, #business_rate_select_line, #business_rate_value_line, [id*='interest_total_debx'], [id*='interest_total_debj'], #business_atc_recmd_mod").hide();
-                    loanType = 1;
-                } else {
-                    $("#business_sum_line, #business_rate_select_line, #business_rate_value_line, #PAF_sum_line, #PAF_rate_line, [id*='interest_total_debx'], [id*='interest_total_debj'], #business_atc_recmd_mod").show();
-                    $("#PAF_atc_recmd_mod").hide();
-                    loanType = 2;
-                }
-            }
-        });
-
-        // 结果页选项卡切换 (等额本息 vs 等额本金)
-        $(".result-tab").on("click", function() {
-            if ($(this).hasClass("normal-tab")) {
-                $(this).removeClass("normal-tab").addClass("select-tab").siblings(".result-tab").removeClass("select-tab").addClass("normal-tab");
-                var tid = $(this).attr("tab-id");
-                $("#result_data_" + tid).show().siblings(".result-data").hide();
-                showResultTabID = parseInt(tid);
-            }
-        });
-
-        // 贷款期限联动计算
-        $("#loan_period_select").on("change", function() {
-            var val = parseInt($(this).val());
-            if (val == 0) { loanPeriods = 6; PAFPeriodType = businessPeriodType = 0; }
-            else if (val == 1) { loanPeriods = 12; businessPeriodType = 1; PAFPeriodType = 0; }
-            else if (val <= 3) { loanPeriods = 12 * val; businessPeriodType = 2; PAFPeriodType = 0; }
-            else if (val <= 5) { loanPeriods = 12 * val; businessPeriodType = 3; PAFPeriodType = 0; }
-            else { loanPeriods = 12 * val; businessPeriodType = 4; PAFPeriodType = 1; }
-            
-            $("#loan_period_select_bar").text($(this).find("option:selected").text());
-            if ($("#business_rate_select").attr("input-method") == "auto") businessRateUpdate();
-            if ($("#PAF_rate_select").attr("input-method") == "auto") PAFRateUpdate();
-        });
-
-        // 利率选择联动
-        $("#business_rate_select").on("change", function() {
-            businessRateType = $(this).val();
-            $("#business_rate_select_bar").text($(this).find("option:selected").text());
-            if (businessRateType == -1) {
-                $("#business_discount_field").hide();
-                $("#business_rate_select_field").removeClass("long-field");
-                $("#business_rate").val("");
-                $(this).attr("input-method", "hand");
-            } else {
-                $("#business_rate_select_field").addClass("long-field");
-                $("#business_discount_field").show();
-                $(this).attr("input-method", "auto");
-                businessRateUpdate();
-            }
-        });
-
-        $("#business_discount").on("change", function() {
-            businessDiscount = parseFloat($(this).find("option:selected").attr("data-discount"));
-            $("#business_discount_bar").text($(this).find("option:selected").text());
-            businessRateUpdate();
-        });
-
-        $("#PAF_rate_select").on("change", function() {
-            PAFRateType = $(this).val();
-            $("#PAF_rate_select_bar").text($(this).find("option:selected").text());
-            if (PAFRateType == -1) {
-                $("#PAF_rate").val("");
-                $(this).attr("input-method", "hand");
-            } else {
-                $(this).attr("input-method", "auto");
-                PAFRateUpdate();
-            }
-        });
-
-        // 按钮交互逻辑
-        $("#calculate").on("click", function() {
-            if (userInputCheck()) {
-                calculate();
-                window.scrollTo(0, 0);
-                $("[view=calc_input]").hide();
-                $("[view=calc_result]").show();
-            }
-        });
-
-        $("#recalculate").on("click", function() {
-            window.scrollTo(0, 0);
+var businessShortRateArr6 = [5.1, 5.35, 5.6, 5.85, 6.1, 5.85, 5.6, 5.6, 5.35, 5.1, 4.85, 4.6, 3.45],
+    businessShortRateArr12 = [5.56, 5.81, 6.06, 6.31, 6.56, 6.31, 6, 5.6, 5.35, 5.1, 4.85, 4.6, 3.45],
+    businessShortRateArr36 = [5.6, 5.85, 6.1, 6.4, 6.65, 6.4, 6.15, 6, 5.75, 5.5, 5.25, 5, 3.45],
+    businessShortRateArr60 = [5.96, 6.22, 6.45, 6.65, 6.9, 6.65, 6.4, 6, 5.75, 5.5, 5.25, 5, 4.2],
+    businessLongRateArr = [6.14, 6.4, 6.6, 6.8, 7.05, 6.8, 6.55, 6.15, 5.9, 5.65, 5.4, 5.15, 4.2],
+    PAFShortRateArr = [3.5, 3.75, 4, 4.2, 4.45, 4.2, 4, 3.75, 3.5, 3.25, 3, 2.75, 2.75],
+    PAFLongRateArr = [4.05,
+        4.3, 4.5, 4.7, 4.45, 4.7, 4.5, 4.25, 4, 3.75, 3.5, 3.25, 3.25
+    ],
+    loanType = 0,
+    loanPeriods = 240,
+    businessPeriodType = 4,
+    PAFPeriodType = 1,
+    businessRateType = 12,
+    PAFRateType = 12,
+    businessDiscount = 1,
+    showResultTabID = 1,
+    simpleDataTableMaxLines = 10,
+    BLinkStatus = 0;
+$(function() {
+    $("#business_calc").on("click", function() {
+        0 <= $(this).attr("class").indexOf("normal-tab") && ($(this).removeClass("normal-tab").addClass("select-tab").siblings(".tab").removeClass("select-tab").addClass("normal-tab"), $("#business_sum_line").show(), $("#business_rate_select_line").show(), $("#business_rate_value_line").show(), $("#PAF_sum_line").hide(), $("#PAF_rate_line").hide(), $("#business_interest_total_debx").hide(), $("#PAF_interest_total_debx").hide(), $("#business_interest_total_debj").hide(),
+            $("#PAF_interest_total_debj").hide(), $("#business_atc_recmd_mod").show(), $("#PAF_atc_recmd_mod").hide(), loanType = 0)
+    });
+    $("#PAF_calc").on("click", function() {
+        0 <= $(this).attr("class").indexOf("normal-tab") && ($(this).removeClass("normal-tab").addClass("select-tab").siblings(".tab").removeClass("select-tab").addClass("normal-tab"), $("#PAF_sum_line").show(), $("#PAF_rate_line").show(), $("#business_sum_line").hide(), $("#business_rate_select_line").hide(), $("#business_rate_value_line").hide(), $("#business_interest_total_debx").hide(),
+            $("#PAF_interest_total_debx").hide(), $("#business_interest_total_debj").hide(), $("#PAF_interest_total_debj").hide(), $("#PAF_atc_recmd_mod").show(), $("#business_atc_recmd_mod").hide(), loanType = 1)
+    });
+    $("#mix_calc").on("click", function() {
+        0 <= $(this).attr("class").indexOf("normal-tab") && ($(this).removeClass("normal-tab").addClass("select-tab").siblings(".tab").removeClass("select-tab").addClass("normal-tab"), $("#business_sum_line").show(), $("#business_rate_select_line").show(), $("#business_rate_value_line").show(),
+            $("#PAF_sum_line").show(), $("#PAF_rate_line").show(), $("#business_interest_total_debx").show(), $("#PAF_interest_total_debx").show(), $("#business_interest_total_debj").show(), $("#PAF_interest_total_debj").show(), $("#business_atc_recmd_mod").show(), $("#PAF_atc_recmd_mod").hide(), loanType = 2)
+    });
+    $(".result-tab").on("click", function() {
+        if (0 <= $(this).attr("class").indexOf("normal-tab")) {
+            $(this).removeClass("normal-tab").addClass("select-tab").siblings(".result-tab").removeClass("select-tab").addClass("normal-tab");
+            var a = $(this).attr("tab-id");
+            $("#result_data_" + a).show().siblings(".result-data").hide();
+            showResultTabID = parseInt(a)
+        }
+    });
+    $("#loan_period_select").on("change", function() {
+        var a = parseInt($(this).val());
+        0 == a ? (loanPeriods = 6, PAFPeriodType = businessPeriodType = 0) : 1 == a ? (loanPeriods = 12 * a, businessPeriodType = 1, PAFPeriodType = 0) : 3 >= a ? (loanPeriods = 12 * a, businessPeriodType = 2, PAFPeriodType = 0) : 5 >= a ? (loanPeriods = 12 * a, businessPeriodType = 3, PAFPeriodType = 0) : (loanPeriods = 12 * a, businessPeriodType = 4, PAFPeriodType = 1);
+        $("#loan_period_select_bar").text($(this).find("option:selected").text());
+        $("#loan_period_select_bar").val($(this).val());
+        "auto" == $("#business_rate_select").attr("input-method") && businessRateUpdate();
+        "auto" == $("#PAF_rate_select").attr("input-method") && PAFRateUpdate()
+    });
+    $("#business_rate_select").on("change", function() {
+        var a = $(this).val();
+        businessRateType = a;
+        $("#business_rate_select_bar").text($(this).find("option:selected").text());
+        $("#business_rate_select_bar").val($(this).val()); - 1 == a ? ($("#business_discount_field").hide(), $("#business_rate_select_field").removeClass("long-field"),
+            $("#business_rate").val(""), $(this).attr("input-method", "hand")) : 0 <= a && ("hand" == $(this).attr("input-method") && ($("#business_rate_select_field").addClass("long-field"), $("#business_discount_field").show(), $(this).attr("input-method", "auto")), businessRateUpdate())
+    });
+    $("#business_discount").on("change", function() {
+        businessDiscount = parseFloat($(this).find("option:selected").attr("data-discount"));
+        $("#business_discount_bar").text($(this).find("option:selected").text());
+        $("#business_discount_bar").attr("data-discount",
+            $(this).find("option:selected").attr("data-discount"));
+        businessRateUpdate()
+    });
+    $("#PAF_rate_select").on("change", function() {
+        var a = $(this).val();
+        PAFRateType = a;
+        $("#PAF_rate_select_bar").text($(this).find("option:selected").text());
+        $("#PAF_rate_select_bar").val($(this).val()); - 1 == a ? ($("#PAF_rate").val(""), $(this).attr("input-method", "hand")) : 0 <= a && ("hand" == $(this).attr("input-method") && $(this).attr("input-method", "auto"), PAFRateUpdate())
+    });
+    $("#calculate").on("click", function() {
+        userInputCheck() && (calculate(),
+            window.scrollTo("0", "0"), $("[view=calc_input]").hide(), $("[view=calc_result]").show())
+    });
+    $("#recalculate").on("click", function() {
+        window.scrollTo("0", "0");
+        $("[view=calc_result]").hide();
+        $("[view=calc_input]").show()
+    });
+    $(".view-more").on("click", function() {
+        var a = $(this).attr("data-detail");
+        $("#data_detail_" + a).show().siblings(".data-container").hide();
+        window.scrollTo("0", "0");
+        $("[view=calc_result]").hide();
+        $("[view=data_detail]").show();
+        $("#data_detail_bar").show()
+    });
+    $("#back_to_calc_input").on("click",
+        function() {
+            window.scrollTo("0", "0");
             $("[view=calc_result]").hide();
-            $("[view=calc_input]").show();
+            $("[view=calc_input]").show()
         });
+    $("#back_to_calc_result").on("click", function() {
+        window.scrollTo("0", "0");
+        $("#data_detail_bar").hide();
+        $("[view=data_detail]").hide();
+        $("[view=calc_result]").show()
+    });
+    $('[ad-type="cpa"]').on("click", function() {
+        window.location.href = $(this).attr("ad-url")
+    });
+    $('[link-type="A_Link"]').on("click", function() {
+        0 == BLinkStatus && ($('[link-type="B_Link"]').each(function() {
+                $(this).attr("href", $(this).attr("href2"))
+            }),
+            BLinkStatus = 1)
+    });
+    $('[link-type="B_Link"]').on("click", function() {
+        0 == BLinkStatus && ($(this).addClass("clicked"), $('[link-type="B_Link"]:not(.clicked)').each(function() {
+            $(this).attr("href", $(this).attr("href2"))
+        }), BLinkStatus = 1)
+    });
+    $(".loan-search-module #FormDaikuan").submit(function(a) {
+        var b = !0,
+            d = !0,
+            f = $.trim($('.loan-search-module input[name="loan_limit"]').val()),
+            c = $.trim($('.loan-search-module input[name="loan_term"]').val()),
+            g = $(".loan-search-module .warning"),
+            e = "";
+        0 == f.length ? (b = !1, e = "请输入贷款金额") :
+            (f = parseFloat(f), 0 == f ? (b = !1, e = "贷款金额不能为0") : 700 <= f && (b = !1, e = "贷款金额太大 请核对"));
+        0 == c.length ? (d = !1, e += " 请输入贷款期限") : (c = parseInt(c), 0 == c ? (d = !1, e += " 贷款期限不能为0") : 120 < c && (d = !1, e += " 贷款期限不能超过10年"));
+        b && d ? (g.text(""), g.hide()) : (g.text(e), g.show(), a.preventDefault())
+    })
+});
 
-        $(".view-more").on("click", function() {
-            var detailId = $(this).attr("data-detail");
-            $("#data_detail_" + detailId).show().siblings(".data-container").hide();
-            window.scrollTo(0, 0);
-            $("[view=calc_result]").hide();
-            $("[view=data_detail]").show();
-            $("#data_detail_bar").show();
-        });
+function businessRateUpdate() {
+    var a = 0;
+    0 == businessPeriodType ? a = businessShortRateArr6[businessRateType] : 1 == businessPeriodType ? a = businessShortRateArr12[businessRateType] : 2 == businessPeriodType ? a = businessShortRateArr36[businessRateType] : 3 == businessPeriodType ? a = businessShortRateArr60[businessRateType] : 4 == businessPeriodType && (a = businessLongRateArr[businessRateType]);
+    a *= businessDiscount;
+    a = Math.round(100 * a) / 100;
+    $("#business_rate").val("" + a)
+}
 
-        $("#back_to_calc_input").on("click", function() {
-            window.scrollTo(0, 0);
-            $("[view=calc_result]").hide();
-            $("[view=calc_input]").show();
-        });
+function PAFRateUpdate() {
+    var a = 0;
+    0 == PAFPeriodType ? a = PAFShortRateArr[PAFRateType] : 1 == PAFPeriodType && (a = PAFLongRateArr[PAFRateType]);
+    $("#PAF_rate").val("" + a)
+}
 
-        $("#back_to_calc_result").on("click", function() {
-            window.scrollTo(0, 0);
-            $("#data_detail_bar").hide();
-            $("[view=data_detail]").hide();
-            $("[view=calc_result]").show();
-        });
-
-        // --- 3. 内部计算逻辑函数 ---
-
-        function businessRateUpdate() {
-            var rate = 0;
-            if (businessPeriodType == 0) rate = businessShortRateArr6[businessRateType];
-            else if (businessPeriodType == 1) rate = businessShortRateArr12[businessRateType];
-            else if (businessPeriodType == 2) rate = businessShortRateArr36[businessRateType];
-            else if (businessPeriodType == 3) rate = businessShortRateArr60[businessRateType];
-            else if (businessPeriodType == 4) rate = businessLongRateArr[businessRateType];
-            // 修正显示精度，避免出现 4.1999999...
-            $("#business_rate").val((Math.round(rate * businessDiscount * 100) / 100).toFixed(2));
-        }
-
-        function PAFRateUpdate() {
-            var rate = (PAFPeriodType == 0) ? PAFShortRateArr[PAFRateType] : PAFLongRateArr[PAFRateType];
-            $("#PAF_rate").val(rate);
-        }
-
-        function userInputCheck() {
-            if (loanType == 0) return checkField("#business_sum") && checkField("#business_rate");
-            if (loanType == 1) return checkField("#PAF_sum") && checkField("#PAF_rate");
-            if (loanType == 2) return checkField("#business_sum") && checkField("#business_rate") && checkField("#PAF_sum") && checkField("#PAF_rate");
-            return false;
-        }
-
-        function checkField(id) {
-            var val = $.trim($(id).val());
-            if (val != "" && /^\d*[\.]?\d*$/.test(val) && parseFloat(val) > 0) return true;
-            $(id).val("").focus();
-            return false;
-        }
-
-        // --- 4. 核心数学计算引擎 (Precision-First) ---
-
-        function calculate() {
-            calculate_debx(); // 计算等额本息
-            calculate_debj(); // 计算等额本金
-            
-            // 默认展示用户选中的还款方式
-            var type = $('input[name="repayType"]:checked').val();
-            $(".result-tab[tab-id=" + type + "]").click();
-        }
-
-        function calculate_debx() {
-            var bSum = 1E4 * parseFloat($("#business_sum").val()) || 0;
-            var bRate = parseFloat($("#business_rate").val()) / 1200 || 0;
-            var pSum = 1E4 * parseFloat($("#PAF_sum").val()) || 0;
-            var pRate = parseFloat($("#PAF_rate").val()) / 1200 || 0;
-
-            if (loanType == 0) solveDebx(bSum, bRate);
-            else if (loanType == 1) solveDebx(pSum, pRate);
-            else solveDebxMix(bSum, bRate, pSum, pRate);
-        }
-
-        function solveDebx(total, mRate) {
-            // 公式：月供 = [贷款本金×月利率×(1+月利率)^还款月数]÷[(1+月利率)^还款月数-1]
-            var mRepay = total * mRate * Math.pow(1 + mRate, loanPeriods) / (Math.pow(1 + mRate, loanPeriods) - 1);
-            var totalRepay = mRepay * loanPeriods;
-            var interest = totalRepay - total;
-            fillResult(1, interest, totalRepay, mRepay, total, mRate);
-        }
-
-        function solveDebxMix(aSum, aRate, bSum, bRate) {
-            // 分别计算商贷与公积金
-            var aMonth = aSum * aRate * Math.pow(1 + aRate, loanPeriods) / (Math.pow(1 + aRate, loanPeriods) - 1);
-            var bMonth = bSum * bRate * Math.pow(1 + bRate, loanPeriods) / (Math.pow(1 + bRate, loanPeriods) - 1);
-            var aInt = aMonth * loanPeriods - aSum;
-            var bInt = bMonth * loanPeriods - bSum;
-            
-            var totalInt = aInt + bInt;
-            var totalRepay = aSum + bSum + totalInt;
-            var mRepay = aMonth + bMonth;
-
-            $("#business_interest_total_1").text(aInt.toFixed(2) + "元");
-            $("#PAF_interest_total_1").text(bInt.toFixed(2) + "元");
-            fillResultMix(1, totalInt, totalRepay, mRepay, aSum, aRate, bSum, bRate);
-        }
-
-        function calculate_debj() {
-            var bSum = 1E4 * parseFloat($("#business_sum").val()) || 0;
-            var bRate = parseFloat($("#business_rate").val()) / 1200 || 0;
-            var pSum = 1E4 * parseFloat($("#PAF_sum").val()) || 0;
-            var pRate = parseFloat($("#PAF_rate").val()) / 1200 || 0;
-
-            if (loanType == 0) solveDebj(bSum, bRate);
-            else if (loanType == 1) solveDebj(pSum, pRate);
-            else solveDebjMix(bSum, bRate, pSum, pRate);
-        }
-
-        function solveDebj(total, mRate) {
-            // 等额本金总利息 = [(分期数+1)×贷款总额×月利率]/2
-            var interest = (loanPeriods + 1) * total * mRate / 2;
-            var totalRepay = interest + total;
-            var baseP = total / loanPeriods;
-            fillResult(2, interest, totalRepay, 0, total, mRate, baseP);
-        }
-
-        function solveDebjMix(aSum, aRate, bSum, bRate) {
-            var aInt = (loanPeriods + 1) * aSum * aRate / 2;
-            var bInt = (loanPeriods + 1) * bSum * bRate / 2;
-            var totalInt = aInt + bInt;
-            var totalRepay = aSum + bSum + totalInt;
-            var baseP = (aSum + bSum) / loanPeriods;
-            
-            $("#business_interest_total_2").text(aInt.toFixed(2) + "元");
-            $("#PAF_interest_total_2").text(bInt.toFixed(2) + "元");
-            fillResultMix(2, totalInt, totalRepay, 0, aSum, aRate, bSum, bRate, baseP);
-        }
-
-        // --- 5. 数据填充与表格生成 ---
-
-        function fillResult(tab, interest, totalRepay, mRepay, total, mRate, baseP) {
-            $("#interest_total_" + tab).text(interest.toFixed(2) + "元");
-            $("#repay_total_" + tab).text(totalRepay.toFixed(2) + "元");
-            var html = "", simpleHtml = "", firstM = 0, firstI = 0;
-
-            for (var i = 1; i <= loanPeriods; i++) {
-                var curI, curM, curP, rem;
-                if (tab == 1) { // 等额本息
-                    curI = total * mRate * (Math.pow(1 + mRate, loanPeriods) - Math.pow(1 + mRate, i - 1)) / (Math.pow(1 + mRate, loanPeriods) - 1);
-                    curM = mRepay; curP = curM - curI;
-                    rem = total * (Math.pow(1 + mRate, loanPeriods) - Math.pow(1 + mRate, i)) / (Math.pow(1 + mRate, loanPeriods) - 1);
-                } else { // 等额本金
-                    curI = (total - baseP * (i - 1)) * mRate;
-                    curP = baseP; curM = curI + curP;
-                    rem = total - baseP * i;
-                }
-                if(i == 1) { firstM = curM; firstI = curI; }
-                var row = "<tr><td>"+i+"</td><td>"+curM.toFixed(2)+"</td><td>"+curI.toFixed(2)+"</td><td>"+curP.toFixed(2)+"</td><td>"+Math.max(0, rem).toFixed(2)+"</td></tr>";
-                html += row; if(i <= simpleDataTableMaxLines) simpleHtml += row;
-            }
-            $("#standard_data_table_" + tab).html(html);
-            $("#simple_data_table_" + tab).html(simpleHtml);
-            $("#repay_monthly_" + tab).text(firstM.toFixed(2) + "元");
-            $("#interest_monthly_" + tab).text(firstI.toFixed(2) + "元");
-        }
-
-        function fillResultMix(tab, interest, totalRepay, mRepay, aSum, aRate, bSum, bRate, baseP) {
-            $("#interest_total_" + tab).text(interest.toFixed(2) + "元");
-            $("#repay_total_" + tab).text(totalRepay.toFixed(2) + "元");
-            var html = "", simpleHtml = "", firstM = 0, firstI = 0;
-
-            for (var i = 1; i <= loanPeriods; i++) {
-                var curI, curM, curP, rem;
-                if (tab == 1) { // 组合-本息
-                    var curAI = aSum * aRate * (Math.pow(1 + aRate, loanPeriods) - Math.pow(1 + aRate, i - 1)) / (Math.pow(1 + aRate, loanPeriods) - 1);
-                    var curBI = bSum * bRate * (Math.pow(1 + bRate, loanPeriods) - Math.pow(1 + bRate, i - 1)) / (Math.pow(1 + bRate, loanPeriods) - 1);
-                    curI = curAI + curBI;
-                    curM = mRepay; curP = curM - curI;
-                    var remA = aSum * (Math.pow(1 + aRate, loanPeriods) - Math.pow(1 + aRate, i)) / (Math.pow(1 + aRate, loanPeriods) - 1);
-                    var remB = bSum * (Math.pow(1 + bRate, loanPeriods) - Math.pow(1 + bRate, i)) / (Math.pow(1 + bRate, loanPeriods) - 1);
-                    rem = remA + remB;
-                } else { // 组合-本金
-                    var curAI = (aSum - (aSum/loanPeriods)*(i-1)) * aRate;
-                    var curBI = (bSum - (bSum/loanPeriods)*(i-1)) * bRate;
-                    curI = curAI + curBI;
-                    curP = baseP; curM = curI + curP;
-                    rem = (aSum + bSum) - baseP * i;
-                }
-                if(i == 1) { firstM = curM; firstI = curI; }
-                var row = "<tr><td>"+i+"</td><td>"+curM.toFixed(2)+"</td><td>"+curI.toFixed(2)+"</td><td>"+curP.toFixed(2)+"</td><td>"+Math.max(0, rem).toFixed(2)+"</td></tr>";
-                html += row; if(i <= simpleDataTableMaxLines) simpleHtml += row;
-            }
-            $("#standard_data_table_" + tab).html(html);
-            $("#simple_data_table_" + tab).html(simpleHtml);
-            $("#repay_monthly_" + tab).text(firstM.toFixed(2) + "元");
-            $("#interest_monthly_" + tab).text(firstI.toFixed(2) + "元");
-        }
-    };
-
-    // --- 自动检测并运行 ---
-    if (window.jQuery) {
-        runCalculator();
-    } else {
-        var checkJQ = setInterval(function() {
-            if (window.jQuery) {
-                runCalculator();
-                clearInterval(checkJQ);
-            }
-        }, 50);
+function userInputCheck() {
+    if (0 == loanType) {
+        var a = businessSumInputCheck(),
+            b = businessRateInputCheck();
+        return a && b ? !0 : !1
     }
-})(window.jQuery);
+    if (1 == loanType) {
+        var d = PAFSumInputCheck(),
+            f = PAFRateInputCheck();
+        return d && f ? !0 : !1
+    }
+    if (2 == loanType) return a = businessSumInputCheck(), b = businessRateInputCheck(), d = PAFSumInputCheck(), f = PAFRateInputCheck(), a && b && d && f ? !0 : !1
+}
+
+function businessSumInputCheck() {
+    var a = $.trim($("#business_sum").val()),
+        b = /^\d*[\.]?\d*$/;
+    if ("" != a && b.test(a)) return !0;
+    $("#business_sum").val("").focus();
+    return !1
+}
+
+function businessRateInputCheck() {
+    var a = $.trim($("#business_rate").val()),
+        b = /^\d*[\.]?\d*$/;
+    if ("" != a && b.test(a)) return !0;
+    $("#business_rate").val("").focus();
+    return !1
+}
+
+function PAFSumInputCheck() {
+    var a = $.trim($("#PAF_sum").val()),
+        b = /^\d*[\.]?\d*$/;
+    if ("" != a && b.test(a)) return !0;
+    $("#PAF_sum").val("").focus();
+    return !1
+}
+
+function PAFRateInputCheck() {
+    var a = $.trim($("#PAF_rate").val()),
+        b = /^\d*[\.]?\d*$/;
+    if ("" != a && b.test(a)) return !0;
+    $("#PAF_rate").val("").focus();
+    return !1
+}
+
+function calculate() {
+    calculate_debx();
+    calculate_debj();
+    var a = $('input[name="repayType"]:checked').val();
+    $("#result_tab_" + a).removeClass("normal-tab").addClass("select-tab").siblings(".result-tab").removeClass("select-tab").addClass("normal-tab");
+    $("#result_data_" + a).show().siblings(".result-data").hide();
+    showResultTabID = a
+}
+
+function calculate_debx() {
+    if (0 == loanType) var a = 1E4 * parseFloat($.trim($("#business_sum").val())),
+        b = parseFloat($.trim($("#business_rate").val())) / 1200,
+        a = calculate_debx_singleLoan(a, b);
+    else if (1 == loanType) a = 1E4 * parseFloat($.trim($("#PAF_sum").val())), b = parseFloat($.trim($("#PAF_rate").val())) / 1200, a = calculate_debx_singleLoan(a, b);
+    else if (2 == loanType) var a = 1E4 * parseFloat($.trim($("#business_sum").val())),
+        b = parseFloat($.trim($("#business_rate").val())) / 1200,
+        d = 1E4 * parseFloat($.trim($("#PAF_sum").val())),
+        f = parseFloat($.trim($("#PAF_rate").val())) / 1200,
+        a = calculate_debx_doubleLoan(a, b, d, f);
+    return a
+}
+
+function calculate_debx_singleLoan(a, b) {
+    var d, f, c, g, e, j = a * loanPeriods * b * Math.pow(1 + b, loanPeriods) / (Math.pow(1 + b, loanPeriods) - 1) - a,
+        j = Math.round(100 * j) / 100;
+    d = Math.round(100 * (j + a)) / 100;
+    $("#interest_total_1").text(j + "元");
+    $("#repay_total_1").text("" + d + "元");
+    f = d / loanPeriods;
+    f = Math.round(100 * f) / 100;
+    var m = 0,
+        h = "",
+        i = "";
+    for (d = 1; d <= loanPeriods; d++) c = a * b * (Math.pow(1 + b, loanPeriods) - Math.pow(1 + b, d - 1)) / (Math.pow(1 + b, loanPeriods) - 1), c = Math.round(100 * c) / 100, g = f - c, g = Math.round(100 * g) / 100, e = a * (Math.pow(1 + b, loanPeriods) -
+        Math.pow(1 + b, d)) / (Math.pow(1 + b, loanPeriods) - 1), e = Math.round(100 * e) / 100, h += "<tr>", h = h + "<td>" + d + "</td>", h = h + "<td>" + f + "</td>", h = h + "<td>" + c + "</td>", h = h + "<td>" + g + "</td>", h = h + "<td>" + e + "</td>", h += "</tr>", 1 == d && (m = c), d == simpleDataTableMaxLines && (i = h);
+    $("#standard_data_table_1").html("" + h);
+    "" == i && (i = h);
+    $("#simple_data_table_1").html("" + i);
+    $("#repay_monthly_1").text(f + "元");
+    $("#interest_monthly_1").text(m + "元");
+    return j
+}
+
+function calculate_debx_doubleLoan(a, b, d, f) {
+    var c, g, e, j, m;
+    c = a * loanPeriods * b * Math.pow(1 + b, loanPeriods) / (Math.pow(1 + b, loanPeriods) - 1) - a;
+    c = Math.round(100 * c) / 100;
+    e = c + a;
+    g = d * loanPeriods * f * Math.pow(1 + f, loanPeriods) / (Math.pow(1 + f, loanPeriods) - 1) - d;
+    g = Math.round(100 * g) / 100;
+    j = g + d;
+    var h;
+    h = Math.round(100 * (c + g)) / 100;
+    e = Math.round(100 * (e + j)) / 100;
+    $("#business_interest_total_1").text(c + "元");
+    $("#PAF_interest_total_1").text(g + "元");
+    $("#interest_total_1").text(h + "元");
+    $("#repay_total_1").text(e + "元");
+    g = e / loanPeriods;
+    g = Math.round(100 *
+        g) / 100;
+    var i = 0,
+        k = "",
+        l = "";
+    for (c = 1; c <= loanPeriods; c++) e = a * b * (Math.pow(1 + b, loanPeriods) - Math.pow(1 + b, c - 1)) / (Math.pow(1 + b, loanPeriods) - 1), e += d * f * (Math.pow(1 + f, loanPeriods) - Math.pow(1 + f, c - 1)) / (Math.pow(1 + f, loanPeriods) - 1), e = Math.round(100 * e) / 100, j = g - e, j = Math.round(100 * j) / 100, m = a * (Math.pow(1 + b, loanPeriods) - Math.pow(1 + b, c)) / (Math.pow(1 + b, loanPeriods) - 1), m += d * (Math.pow(1 + f, loanPeriods) - Math.pow(1 + f, c)) / (Math.pow(1 + f, loanPeriods) - 1), m = Math.round(100 * m) / 100, k += "<tr>", k = k + "<td>" + c + "</td>", k = k + "<td>" + g + "</td>",
+        k = k + "<td>" + e + "</td>", k = k + "<td>" + j + "</td>", k = k + "<td>" + m + "</td>", k += "</tr>", 1 == c && (i = e), c == simpleDataTableMaxLines && (l = k);
+    $("#standard_data_table_1").html("" + k);
+    "" == l && (l = k);
+    $("#simple_data_table_1").html("" + l);
+    $("#repay_monthly_1").text(g + "元");
+    $("#interest_monthly_1").text(i + "元");
+    return h
+}
+
+function calculate_debj() {
+    if (0 == loanType) var a = 1E4 * parseFloat($.trim($("#business_sum").val())),
+        b = parseFloat($.trim($("#business_rate").val())) / 1200,
+        a = calculate_debj_singleLoan(a, b);
+    else if (1 == loanType) a = 1E4 * parseFloat($.trim($("#PAF_sum").val())), b = parseFloat($.trim($("#PAF_rate").val())) / 1200, a = calculate_debj_singleLoan(a, b);
+    else if (2 == loanType) var a = 1E4 * parseFloat($.trim($("#business_sum").val())),
+        b = parseFloat($.trim($("#business_rate").val())) / 1200,
+        d = 1E4 * parseFloat($.trim($("#PAF_sum").val())),
+        f = parseFloat($.trim($("#PAF_rate").val())) / 1200,
+        a = calculate_debj_doubleLoan(a, b, d, f);
+    return a
+}
+
+function calculate_debj_singleLoan(a, b) {
+    var d, f, c, g, e, j = a * b * (loanPeriods + 1) / 2,
+        j = Math.round(100 * j) / 100;
+    d = Math.round(100 * (j + a)) / 100;
+    $("#interest_total_2").text("" + j + "元");
+    $("#repay_total_2").text("" + d + "元");
+    g = a / loanPeriods;
+    g = Math.round(100 * g) / 100;
+    var m = 0,
+        h = 0,
+        i = "",
+        k = "";
+    for (d = 1; d <= loanPeriods; d++) c = a * b * (loanPeriods - d + 1) / loanPeriods, c = Math.round(100 * c) / 100, f = c + g, f = Math.round(100 * f) / 100, e = a * (loanPeriods - d) / loanPeriods, e = Math.round(100 * e) / 100, i += "<tr>", i = i + "<td>" + d + "</td>", i = i + "<td>" + f + "</td>", i = i + "<td>" +
+        c + "</td>", i = i + "<td>" + g + "</td>", i = i + "<td>" + e + "</td>", i += "</tr>", 1 == d && (m = f, h = c), d == simpleDataTableMaxLines && (k = i);
+    $("#standard_data_table_2").html("" + i);
+    "" == k && (k = i);
+    $("#simple_data_table_2").html("" + k);
+    $("#repay_monthly_2").text(m + "元");
+    $("#interest_monthly_2").text(h + "元");
+    return j
+}
+
+function calculate_debj_doubleLoan(a, b, d, f) {
+    var c, g, e, j, m;
+    c = a * b * (loanPeriods + 1) / 2;
+    c = Math.round(100 * c) / 100;
+    e = c + a;
+    g = d * f * (loanPeriods + 1) / 2;
+    g = Math.round(100 * g) / 100;
+    j = g + d;
+    var h;
+    h = Math.round(100 * (c + g)) / 100;
+    e = Math.round(100 * (e + j)) / 100;
+    $("#business_interest_total_2").text(c + "元");
+    $("#PAF_interest_total_2").text(g + "元");
+    $("#interest_total_2").text(h + "元");
+    $("#repay_total_2").text(e + "元");
+    j = (a + d) / loanPeriods;
+    j = Math.round(100 * j) / 100;
+    var i = 0,
+        k = 0,
+        l = "",
+        n = "";
+    for (c = 1; c <= loanPeriods; c++) e = a * b * (loanPeriods - c + 1) / loanPeriods,
+        e += d * f * (loanPeriods - c + 1) / loanPeriods, e = Math.round(100 * e) / 100, g = e + j, g = Math.round(100 * g) / 100, m = a * (loanPeriods - c) / loanPeriods, m += d * (loanPeriods - c) / loanPeriods, m = Math.round(100 * m) / 100, l += "<tr>", l = l + "<td>" + c + "</td>", l = l + "<td>" + g + "</td>", l = l + "<td>" + e + "</td>", l = l + "<td>" + j + "</td>", l = l + "<td>" + m + "</td>", l += "</tr>", 1 == c && (i = g, k = e), c == simpleDataTableMaxLines && (n = l);
+    $("#standard_data_table_2").html("" + l);
+    "" == n && (n = l);
+    $("#simple_data_table_2").html("" + n);
+    $("#repay_monthly_2").text(i + "元");
+    $("#interest_monthly_2").text(k +
+        "元");
+    return h
+};
